@@ -17,12 +17,16 @@ DirGrep is a Bash script designed to simplify the process of directory fuzzing a
 
 ## Usage
 ./dirgrep.sh [-u user_agent] [-d domain] [-c cookie] [-h | -help]
-Options
+## Options
 -u user_agent: Specify a custom User-Agent for curl requests (optional).
+
 -d domain: Specify the domain to fuzz.
+
 -c cookie: Specify a custom cookie to be used with curl requests (optional) (e.g -c NAME:VALUE).
+
 -h, -help: Show the help message.
-Interactive Commands
+
+## Interactive Commands
 While the tool is in use, the following commands are available:
 
 EXIT: Exit the tool.
