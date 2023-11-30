@@ -1,6 +1,8 @@
 ## Description
 
-DirGrep is a Bash script designed to simplify the process of directory fuzzing and keyword searching within a specified domain. It leverages Gobuster for directory fuzzing and curl for sending HTTP requests.
+DirGrep is a Bash script designed to simplify and combine the process of directory fuzzing and keyword searching within a specified domain. It leverages Gobuster for directory fuzzing and curl for sending HTTP requests.
+
+Can be useful in CTFs searching for keywords on a domain, or searching for statements that could represent a vulnerability on the domain you're scanning
 
 ## Features
 
