@@ -41,5 +41,10 @@ Press Ctrl+C to interrupt domain scanning and search with currently found direct
 
 Leave the URL field blank to proceed with the last scanned domain.
 
+Script will dump a lot of messy log files to /tmp. To protect from information disclosure, chmod 600 is ran on these files.
+If you want these log files for some reason, you can modify Constants on the script with your desired directory.
+
+Saving results to a text file will always write to the working directory
+
 ## License
 This project is licensed under the terms of the MIT license.
