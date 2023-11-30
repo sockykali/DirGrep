@@ -19,6 +19,7 @@ Can be useful in CTFs searching for keywords on a domain, or searching for state
 
 ## Usage
 ./dirgrep.sh [-u user_agent] [-d domain] [-c cookie] [-h | -help]
+
 ## Options
 -u user_agent: Specify a custom User-Agent for curl requests (optional).
 
@@ -32,9 +33,13 @@ Can be useful in CTFs searching for keywords on a domain, or searching for state
 While the tool is in use, the following commands are available:
 
 EXIT: Exit the tool.
+
 RESCAN: Rescan the domain using the same wordlist.
-Notes
+
+## Notes
 Press Ctrl+C to interrupt domain scanning and search with currently found directories.
+
 Leave the URL field blank to proceed with the last scanned domain.
-License
+
+## License
 This project is licensed under the terms of the MIT license.
