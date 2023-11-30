@@ -20,6 +20,16 @@ Can be useful in CTFs searching for keywords on a domain, or searching for state
 ## Usage
 ./dirgrep.sh [-u user_agent] [-d domain] [-c cookie] [-h | -help]
 
+## Quickstart
+curl -sL https://raw.githubusercontent.com/sockykali/DirGrep/main/DirGrep.sh | tr -d '\r' > DirGrep.sh && chmod +x DirGrep.sh && ./DirGrep.sh
+
+To add as a tool on your system, run this (OffSec will include it in the Repo... soon... hopefully...)
+
+sudo cp DirGrep.sh /usr/local/bin/dirgrep
+
+(callable with 'dirgrep' e.g. 'dirgrep -help')
+
+
 ## Options
 -u user_agent: Specify a custom User-Agent for curl requests (optional).
 
