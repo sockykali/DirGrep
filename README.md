@@ -46,5 +46,9 @@ If you want these log files for some reason, you can modify Constants on the scr
 
 Saving results to a text file will always write to the working directory
 
+## Contact
+
+Feedback, improvements, issues, suggestions, banter, please reach me here - dirgrep@proton.me
+
 ## License
 This project is licensed under the terms of the MIT license.
