@@ -1,63 +1,184 @@
-## Description
+# DirGrep
 
-DirGrep is a Bash script designed to simplify and combine the process of directory fuzzing and keyword searching within a specified domain. It leverages Gobuster for directory fuzzing and curl for sending HTTP requests.
+```
+   ______  __  ______  ______  ______  ______  ______   
+  /\  __ \/\ \/\  == \/\  ___\/\  == \/\  ___\/\  == \  
+  \ \ \/\ \ \ \ \  __<\ \ \__ \ \  __<\ \  __\\ \  _-/  
+   \ \_____\ \_\ \_\ \_\ \_____\ \_\ \_\ \_____\ \_\    
+    \/_____/\/_/\/_/ /_/\/_____/\/_/ /_/\/_____/\/_/    
+```
 
-Can be useful in CTFs searching for keywords on a domain, or searching for statements that could represent a vulnerability on the domain you're scanning
+**Directory fuzzer + recon toolkit for practice pentesting boxes... or whatever...**
+**Use Resonsibly**
+Built for Kali Linux. Wraps gobuster, nikto, and sqlmap into a single interactive session with a unified output style.
+
+---
 
 ## Features
 
-- Directory fuzzing using Gobuster
-- Keyword searching in the content of the discovered directories
-- Customizable User-Agent and cookies for HTTP requests
-- Retry mechanism for failed HTTP requests
-- Logging of operations to a file
+### Two scan modes at startup
+- **Directory scanning** — fuzz paths on a web target using configurable wordlists
+- **Subdomain enumeration** — brute-force subdomains using SecLists DNS wordlists
+
+### Directory scanning
+- Interactive wordlist picker (dirbuster, dirb, seclists raft — whichever are installed)
+- Real-time results with colour-coded status codes
+- Automatic juicy file detection — flags `.env`, `.bak`, `.sql`, `.key`, `.pem`, `.config`, `.db` and more with `[★]`
+- Recursive scanning — post-scan, pick directories to drill into (up to depth 3)
+- Rescan with diff — re-run and highlight only new findings
+- Live status code filtering — update ignore list mid-session
+
+### Subdomain enumeration
+- Uses SecLists DNS wordlists (top1million, Jhaddix, fierce, namelist)
+- Warns if target looks like a bare IP address
+- Post-scan commands: RESCAN, HEADERS, NIKTO
+
+### Recon commands (directory mode)
+| Command | What it does |
+|---|---|
+| `HEADERS` | Fingerprinting headers (`Server`, `X-Powered-By`, etc.) + security header audit |
+| `ROBOTS` | Fetches `robots.txt` and `sitemap.xml`, auto-adds discovered paths to the scan list |
+| `NIKTO` | Runs a vuln scan, reformats output in dirgrep's style |
+| `PARAMS` | Fuzz GET parameters on a chosen URL, flags interesting responses |
+| `RECURSE` | Pick discovered directories to fuzz recursively |
+| `RESCAN` | Re-run the scan and diff against previous results |
+| `FILTER` | Update the status code ignore list live |
+| `DIRS` | Print all discovered paths across all scan depths |
+| `EXIT` | End session, prompt to save results |
+
+### SQLi detection
+- Passive probe runs automatically at session end — appends a single quote to every discovered URL and checks responses for SQL error signatures
+- Parameter fuzzing also checks responses passively
+- If hits are found, prompts to launch sqlmap against flagged targets with configurable risk and level
+
+### Output
+- All results saved to a timestamped report on exit
+- Full session log written to `/tmp/dirgrep_enumeration.log`
+- Proxy support throughout (`-p`)
+
+---
 
 ## Requirements
 
-- Gobuster
-- curl
+| Tool | Required | Notes |
+|---|---|---|
+| `gobuster` | ✅ Required | `apt install gobuster` |
+| `curl` | ✅ Required | Pre-installed on Kali |
+| `nikto` | ⚠ Optional | `apt install nikto` — needed for NIKTO command |
+| `sqlmap` | ⚠ Optional | `apt install sqlmap` — needed for SQLi exploitation |
+| `SecLists` | ⚠ Optional | `apt install seclists` — needed for subdomain mode and seclists wordlists |
+
+Missing optional tools are flagged at startup but won't prevent directory scanning from running.
+
+---
+
+## Installation
+
+```bash
+git clone https://github.com/sockykali/dirgrep
+cd dirgrep
+chmod +x dirgrep.sh
+./dirgrep.sh
+```
+
+---
 
 ## Usage
-`./dirgrep.sh [-u user_agent] [-d domain] [-c cookie] [-h | -help]`
 
-## Quickstart
-```curl -sL https://raw.githubusercontent.com/sockykali/DirGrep/main/DirGrep.sh | tr -d '\r' > DirGrep.sh && chmod +x DirGrep.sh && ./DirGrep.sh```
+```
+./dirgrep.sh [flags]
+```
 
-To add as a tool on your system, run this (OffSec will include it in the Repo... soon... hopefully...)
+| Flag | Description | Example |
+|---|---|---|
+| `-d` | Target URL | `-d http://10.10.10.10:80` |
+| `-u` | Custom User-Agent | `-u "Mozilla/5.0"` |
+| `-c` | Session cookie | `-c "session=abc123"` |
+| `-p` | Proxy URL | `-p http://127.0.0.1:8080` |
+| `-H` | Extra HTTP header | `-H "X-Forwarded-For: 127.0.0.1"` |
+| `-r` | Rate limit delay (ms) | `-r 200` |
+| `-i` | Status codes to ignore | `-i 404,403` |
+| `-h` | Help menu | |
 
-```sudo cp DirGrep.sh /usr/local/bin/dirgrep```
+### Example — directory scan with Burp proxy
 
-You can then use `dirgrep -help`
+```bash
+./dirgrep.sh -d http://10.10.10.10:80 -p http://127.0.0.1:8080
+```
 
-## Options
--u user_agent: Specify a custom User-Agent for curl requests (optional).
+### Example — passing domain and cookie at launch
 
--d domain: Specify the domain to fuzz.
+```bash
+./dirgrep.sh -d http://target.com -c "PHPSESSID=abc123"
+```
 
--c cookie: Specify a custom cookie to be used with curl requests (optional) (e.g -c NAME:VALUE).
+---
 
--h, -help: Show the help message.
+## Session flow
 
-## Interactive Commands
-While the tool is in use, the following commands are available:
+```
+Launch → Enter target → Select mode
+         │
+         ├── [1] Directory scanning
+         │     └── Pick wordlist → Proxy? → Scan
+         │           └── Commands: HEADERS, ROBOTS, NIKTO, PARAMS,
+         │                         RECURSE, RESCAN, FILTER, DIRS, EXIT
+         │                 └── On EXIT: SQLi probe → sqlmap prompt → Save results
+         │
+         └── [2] Subdomain enumeration
+               └── Pick DNS wordlist → Proxy? → Scan
+                     └── Commands: RESCAN, HEADERS, NIKTO, EXIT
+```
 
-EXIT: Exit the tool.
+---
 
-RESCAN: Rescan the domain using the same wordlist.
+## Output indicators
+
+| Indicator | Meaning |
+|---|---|
+| `[+]` | Success / match found |
+| `[*]` | Info |
+| `[!]` | Warning |
+| `[✗]` | Error |
+| `[★]` | Juicy file extension detected |
+| `[‼]` | Critical finding (SQLi indicator, Nikto vuln) |
+
+### Status code colours
+| Colour | Codes |
+|---|---|
+| 🟢 Green | 2xx OK |
+| 🔵 Cyan | 3xx Redirect |
+| 🟡 Yellow | 401 / 403 Auth |
+| 🔴 Red | 4xx Client error |
+| 🟣 Magenta | 5xx Server error |
+
+---
+
+## Configuration
+
+Tool paths and defaults are set at the top of the script:
+
+```bash
+ENUM_ENGINE="/usr/bin/gobuster"
+NIKTO_PATH="/usr/bin/nikto"
+SQLMAP_PATH="/usr/bin/sqlmap"
+MAX_RECURSE_DEPTH=3
+IGNORE_CODES="404"
+```
+
+Adjust these if your install paths differ or you're running on a non-Kali distro.
+
+---
 
 ## Notes
-Press Ctrl+C to interrupt domain scanning and search with currently found directories.
 
-Leave the URL field blank to proceed with the last scanned domain.
+- Designed for **practice/CTF environments** only. Only use against targets you own or have explicit permission to test.
+- Ctrl+C during a scan stops the engine early and continues the session with whatever paths were found before the interrupt.
+- The last scanned domain is remembered between sessions — leave the domain prompt blank to reuse it.
+- All temp files are written to `/tmp/dirgrep_*` with `600` permissions.
 
-Script will dump a lot of messy log files to /tmp. To protect from information disclosure, chmod 600 is ran on these files.
-If you want these log files for some reason, you can modify Constants on the script with your desired directory.
-
-Saving results to a text file will always write to the working directory
-
-## Contact
-
-Feedback, improvements, issues, suggestions, banter, please reach me here - dirgrep@proton.me
+---
 
 ## License
-This project is licensed under the terms of the MIT license.
+
+Do whatever you want with it. Credit appreciated but not required.
