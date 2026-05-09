@@ -97,7 +97,7 @@ EOF
     printf "  %s\n" "║  \e[2;32m  author: sockykali  //  use responsibly\e[0;32m            ║"
     printf "  %s\n" "╚══════════════════════════════════════════════════════╝"
     echo -e "\e[0m"
-    echo -e "  \e[2;32m⚠  Requires: gobuster  nikto  sqlmap  curl  SecLists"
+    echo -e "  \e[2;32m⚠  Requires: gobuster  nikto  sqlmap  curl  openssl  SecLists"
     echo -e "     Adjust tool paths at the top of the script if needed.\e[0m"
     echo ""
 }
@@ -131,7 +131,25 @@ show_help() {
     echo -e "    ${C}NIKTO${RESET}       Run a vulnerability scan against the target"
     echo -e "    ${C}ROBOTS${RESET}      Fetch and parse robots.txt + sitemap.xml"
     echo -e "    ${C}PARAMS${RESET}      Fuzz GET parameters on a chosen URL"
+    echo -e "    ${C}BYPASS${RESET}      Try 403/401 bypass techniques on blocked paths"
+    echo -e "    ${C}EXT${RESET}         Brute-force file extensions on discovered paths"
+    echo -e "    ${C}METHODS${RESET}     Fuzz HTTP methods  ${DIM}(PUT DELETE PATCH TRACE…)${RESET}"
+    echo -e "    ${C}BACKUP${RESET}      Probe for backup files  ${DIM}(.bak .old .swp ~…)${RESET}"
     echo -e "    ${C}EXIT${RESET}        End session, prompt to save results"
+    echo ""
+    divider
+    echo -e "  ${BOLD}${C}MODE 2 EXTRA COMMANDS${RESET}"
+    echo ""
+    echo -e "    ${C}VHOST${RESET}       Enumerate virtual hosts via Host-header fuzzing"
+    echo ""
+    divider
+    echo -e "  ${BOLD}${C}MODE 3 COMMANDS  (passive recon)${RESET}"
+    echo ""
+    echo -e "    ${C}SSL${RESET}         Inspect TLS certificate + extract SANs"
+    echo -e "    ${C}JS${RESET}          Extract endpoints from JavaScript files"
+    echo -e "    ${C}CORS${RESET}        Check for CORS misconfigurations"
+    echo -e "    ${C}COOKIES${RESET}     Audit cookie security flags"
+    echo -e "    ${C}TECH${RESET}        Fingerprint CMS, framework, and frontend libraries"
     echo ""
     divider
     echo -e "  ${BOLD}${C}INDICATORS${RESET}"
@@ -185,6 +203,7 @@ check_deps() {
     # Optional — warn but don't exit
     command -v "$NIKTO_PATH"  &>/dev/null || warn "nikto not found  — NIKTO command unavailable"
     command -v "$SQLMAP_PATH" &>/dev/null || warn "sqlmap not found — SQLi exploitation unavailable"
+    command -v openssl        &>/dev/null || warn "openssl not found — SSL inspection unavailable"
 }
 
 # ─────────────────────────────────────────────
@@ -885,6 +904,615 @@ save_results() {
 }
 
 # ─────────────────────────────────────────────
+#  PASSIVE RECON — SSL / TLS
+# ─────────────────────────────────────────────
+inspect_ssl() {
+    local hostname port
+    hostname=$(echo "$domain" | sed 's|https\?://||' | cut -d'/' -f1 | cut -d':' -f1)
+    port=$(echo "$domain" | grep -oP '(?<=:)\d+$')
+    [[ -z "$port" ]] && { [[ "$domain" =~ ^https:// ]] && port=443 || port=80; }
+
+    section "SSL / TLS CERTIFICATE  —  ${hostname}:${port}"
+
+    if ! command -v openssl &>/dev/null; then
+        error "openssl not found — SSL inspection unavailable"; return 1
+    fi
+
+    local cert_raw
+    cert_raw=$(echo | timeout 10 openssl s_client \
+                   -connect "${hostname}:${port}" -servername "$hostname" 2>/dev/null)
+    if ! echo "$cert_raw" | grep -q "BEGIN CERTIFICATE"; then
+        info "No TLS on port $port — trying 443…"
+        cert_raw=$(echo | timeout 10 openssl s_client \
+                       -connect "${hostname}:443" -servername "$hostname" 2>/dev/null)
+    fi
+    if ! echo "$cert_raw" | grep -q "BEGIN CERTIFICATE"; then
+        warn "No TLS certificate found."; return
+    fi
+
+    local x509
+    x509=$(echo "$cert_raw" | openssl x509 -noout -subject -issuer -dates -text 2>/dev/null)
+
+    echo -e "\n  ${BOLD}${W}SUBJECT / ISSUER${RESET}"
+    echo "$x509" | grep -E "^subject=|^issuer=" | \
+        while IFS= read -r ln; do echo -e "  ${DIM}$ln${RESET}"; done
+
+    echo -e "\n  ${BOLD}${W}VALIDITY${RESET}"
+    local not_before not_after
+    not_before=$(echo "$x509" | grep "notBefore=" | sed 's/.*notBefore=//')
+    not_after=$(echo  "$x509" | grep "notAfter="  | sed 's/.*notAfter=//')
+    echo -e "  ${DIM}Not Before : $not_before${RESET}"
+    echo -e "  ${DIM}Not After  : $not_after${RESET}"
+
+    local expiry_epoch; expiry_epoch=$(date -d "$not_after" +%s 2>/dev/null)
+    local now_epoch;    now_epoch=$(date +%s)
+    if [[ -n "$expiry_epoch" ]]; then
+        if (( expiry_epoch < now_epoch )); then
+            alert "Certificate has EXPIRED"
+            results+="[SSL:EXPIRED] $not_after\n"
+        elif (( expiry_epoch - now_epoch < 2592000 )); then
+            warn "Certificate expires within 30 days: $not_after"
+        fi
+    fi
+
+    local subj iss
+    subj=$(echo "$x509" | grep "^subject=" | sed 's/^subject=//')
+    iss=$(echo  "$x509" | grep "^issuer="  | sed 's/^issuer=//')
+    [[ "$subj" == "$iss" ]] && {
+        alert "Self-signed certificate"
+        results+="[SSL:SELF-SIGNED] $hostname\n"
+    }
+
+    echo -e "\n  ${BOLD}${W}SUBJECT ALTERNATIVE NAMES${RESET}  ${DIM}(potential vhosts / targets)${RESET}"
+    local sans
+    sans=$(echo "$x509" | grep -A2 "Subject Alternative Name" | \
+           tr ',' '\n' | grep "DNS:" | sed 's/.*DNS://;s/[[:space:]]//g' | sort -u)
+    if [[ -n "$sans" ]]; then
+        while IFS= read -r san; do
+            juicy "SAN → $san"
+            results+="[SSL:SAN] $san\n"
+            log "SSL SAN: $san"
+        done <<< "$sans"
+    else
+        info "No DNS SANs found."
+    fi
+
+    divider
+    log "SSL inspection done: $domain"
+}
+
+# ─────────────────────────────────────────────
+#  PASSIVE RECON — JS ENDPOINT EXTRACTION
+# ─────────────────────────────────────────────
+run_js_recon() {
+    section "JS ENDPOINT EXTRACTION  —  $domain"
+    info "Crawling index page for script sources…"
+
+    local page_content
+    page_content=$(run_curl "$domain" "$user_agent" "$cookie") || {
+        error "Could not fetch target."; return 1
+    }
+
+    local -a js_urls=()
+    while IFS= read -r src; do
+        [[ -z "$src" ]] && continue
+        if [[ "$src" =~ ^https?:// ]]; then
+            js_urls+=("$src")
+        elif [[ "$src" =~ ^// ]]; then
+            local proto; proto=$(echo "$domain" | grep -oP '^https?')
+            js_urls+=("${proto}:${src}")
+        elif [[ "$src" =~ ^/ ]]; then
+            js_urls+=("${domain}${src}")
+        else
+            js_urls+=("${domain}/${src}")
+        fi
+    done < <(echo "$page_content" | \
+             grep -oiP '(?<=src=["\x27])[^"\x27]+\.js[^"\x27]*(?=["\x27])')
+
+    while IFS= read -r dir; do
+        [[ "$dir" =~ \.js$ ]] && js_urls+=("${domain}${dir}")
+    done < "$ALL_DIRECTORIES_FILE"
+
+    mapfile -t js_urls < <(printf '%s\n' "${js_urls[@]}" | sort -u)
+
+    if [[ ${#js_urls[@]} -eq 0 ]]; then
+        info "No JavaScript files discovered."; return
+    fi
+    success "${#js_urls[@]} JS file(s) to analyse"; divider
+
+    local total_eps=0
+    local tmp_js; tmp_js=$(mktemp /tmp/dirgrep_js.XXXXXX)
+
+    for js_url in "${js_urls[@]}"; do
+        info "→ $(basename "$js_url")"
+        run_curl "$js_url" "$user_agent" "$cookie" > "$tmp_js" 2>/dev/null || continue
+
+        local endpoints
+        endpoints=$(grep -oP '["\x27](/[a-zA-Z0-9_/.-]{2,})["\x27]' "$tmp_js" 2>/dev/null | \
+                    tr -d "\"'" | grep "^/" | \
+                    grep -vE '\.(css|png|jpg|gif|ico|woff2?|ttf|svg|eot|map)$' | sort -u)
+
+        if [[ -n "$endpoints" ]]; then
+            local ec; ec=$(echo "$endpoints" | wc -l)
+            success "$ec path(s) extracted"
+            while IFS= read -r ep; do
+                echo -e "    ${C}$ep${RESET}"
+                echo "$ep" >> "$ALL_DIRECTORIES_FILE"
+                results+="[JS:PATH] $ep\n"
+                (( total_eps++ ))
+            done <<< "$endpoints"
+            sort -u "$ALL_DIRECTORIES_FILE" -o "$ALL_DIRECTORIES_FILE"
+        else
+            info "No path strings extracted."
+        fi
+
+        local ext_urls
+        ext_urls=$(grep -oiP '["\x27](https?://[^"\x27]{8,})["\x27]' "$tmp_js" 2>/dev/null | \
+                   tr -d "\"'" | grep -v "^${domain}" | sort -u | head -15)
+        if [[ -n "$ext_urls" ]]; then
+            warn "External URLs found (check for leaked API hosts / keys):"
+            while IFS= read -r ext; do
+                echo -e "    ${Y}↳ $ext${RESET}"
+                results+="[JS:EXT] $ext\n"
+            done <<< "$ext_urls"
+        fi
+    done
+
+    rm -f "$tmp_js"
+    divider
+    success "$total_eps total endpoint(s) added to discovery pool."
+    log "JS recon complete — $total_eps endpoints"
+}
+
+# ─────────────────────────────────────────────
+#  PASSIVE RECON — CORS CHECK
+# ─────────────────────────────────────────────
+check_cors() {
+    section "CORS MISCONFIGURATION CHECK  —  $domain"
+
+    local -a urls=("$domain")
+    while IFS= read -r dir; do [[ -n "$dir" ]] && urls+=("$domain$dir"); done < "$ALL_DIRECTORIES_FILE"
+    info "Testing ${#urls[@]} URL(s)…"; divider
+
+    local issues=0
+    for url in "${urls[@]}"; do
+        local acao acac acao_null
+        acao=$(curl -s -I --max-time 8 -A "$user_agent" \
+                    -H "Origin: https://evil.com" \
+                    ${cookie:+-b "$cookie"} ${proxy:+--proxy "$proxy"} \
+                    "$url" 2>/dev/null | \
+               grep -i "^access-control-allow-origin:" | \
+               sed 's/[^:]*:[[:space:]]*//' | tr -d '\r ')
+        acac=$(curl -s -I --max-time 8 -A "$user_agent" \
+                    -H "Origin: https://evil.com" \
+                    ${cookie:+-b "$cookie"} ${proxy:+--proxy "$proxy"} \
+                    "$url" 2>/dev/null | \
+               grep -i "^access-control-allow-credentials:" | \
+               sed 's/[^:]*:[[:space:]]*//' | tr -d '\r ' | tr '[:upper:]' '[:lower:]')
+
+        if [[ "$acao" == "https://evil.com" && "$acac" == "true" ]]; then
+            alert "EXPLOITABLE CORS — reflected origin + credentials: $url"
+            results+="[CORS:CRITICAL] $url\n"; log "CORS critical: $url"; (( issues++ ))
+        elif [[ "$acao" == "https://evil.com" ]]; then
+            warn "CORS: arbitrary origin reflected (no creds): $url"
+            results+="[CORS:WARN] reflected origin: $url\n"; (( issues++ ))
+        elif [[ "$acao" == "*" && "$acac" == "true" ]]; then
+            alert "CORS: wildcard + credentials flag: $url"
+            results+="[CORS:WARN] wildcard+creds: $url\n"; (( issues++ ))
+        fi
+
+        acao_null=$(curl -s -I --max-time 8 -A "$user_agent" \
+                        -H "Origin: null" \
+                        ${cookie:+-b "$cookie"} ${proxy:+--proxy "$proxy"} \
+                        "$url" 2>/dev/null | \
+                    grep -i "^access-control-allow-origin:" | \
+                    sed 's/[^:]*:[[:space:]]*//' | tr -d '\r ')
+        if [[ "$acao_null" == "null" ]]; then
+            alert "CORS: null origin accepted: $url"
+            results+="[CORS:WARN] null origin: $url\n"; log "CORS null: $url"; (( issues++ ))
+        fi
+    done
+
+    divider
+    (( issues == 0 )) && info "No CORS misconfigurations detected." || \
+        warn "$issues CORS issue(s) found."
+    log "CORS check complete: $domain"
+}
+
+# ─────────────────────────────────────────────
+#  PASSIVE RECON — COOKIE SECURITY
+# ─────────────────────────────────────────────
+analyze_cookies() {
+    section "COOKIE SECURITY ANALYSIS  —  $domain"
+
+    local raw_hdrs
+    raw_hdrs=$(curl -s -I -L --max-time 10 -A "$user_agent" \
+                   ${cookie:+-b "$cookie"} ${proxy:+--proxy "$proxy"} \
+                   "$domain" 2>/dev/null)
+
+    local cookie_lines
+    cookie_lines=$(echo "$raw_hdrs" | grep -i "^set-cookie:" | tr -d '\r')
+    if [[ -z "$cookie_lines" ]]; then info "No Set-Cookie headers found."; return; fi
+
+    local count; count=$(echo "$cookie_lines" | wc -l)
+    info "$count cookie(s) found"; divider
+
+    local issues=0
+    while IFS= read -r cline; do
+        local name
+        name=$(echo "$cline" | sed 's/[Ss]et-[Cc]ookie:[[:space:]]*//' | \
+               cut -d'=' -f1 | tr -d ' ')
+        echo -e "  ${BOLD}${W}$name${RESET}"
+
+        echo "$cline" | grep -qiE ";[[:space:]]*HttpOnly" \
+            && echo -e "    ${G}[✓]${RESET} HttpOnly" \
+            || { warn "  Missing HttpOnly"; results+="[COOKIE:MISSING] HttpOnly → $name\n"; (( issues++ )); }
+
+        if [[ "$domain" =~ ^https:// ]]; then
+            echo "$cline" | grep -qiE ";[[:space:]]*Secure" \
+                && echo -e "    ${G}[✓]${RESET} Secure" \
+                || { warn "  Missing Secure"; results+="[COOKIE:MISSING] Secure → $name\n"; (( issues++ )); }
+        fi
+
+        local ss; ss=$(echo "$cline" | grep -oiP '(?<=SameSite=)[^\s;,]+' | tr '[:upper:]' '[:lower:]')
+        if [[ -z "$ss" ]]; then
+            warn "  Missing SameSite"
+            results+="[COOKIE:MISSING] SameSite → $name\n"; (( issues++ ))
+        elif [[ "$ss" == "none" ]]; then
+            warn "  SameSite=None (CSRF risk)"
+            results+="[COOKIE:SAMESITE_NONE] $name\n"; (( issues++ ))
+        else
+            echo -e "    ${G}[✓]${RESET} SameSite=${ss}"
+        fi
+        echo ""
+    done <<< "$cookie_lines"
+
+    divider
+    (( issues == 0 )) && success "All cookies look well-configured." || \
+        warn "$issues issue(s) found."
+    log "Cookie analysis done: $domain"
+}
+
+# ─────────────────────────────────────────────
+#  PASSIVE RECON — TECH FINGERPRINTING
+# ─────────────────────────────────────────────
+fingerprint_tech() {
+    section "TECHNOLOGY FINGERPRINT  —  $domain"
+
+    local hdrs page_content
+    hdrs=$(curl -s -I --max-time 10 -A "$user_agent" \
+               ${cookie:+-b "$cookie"} ${proxy:+--proxy "$proxy"} \
+               "$domain" 2>/dev/null)
+    page_content=$(run_curl "$domain" "$user_agent" "$cookie")
+
+    echo -e "\n  ${BOLD}${W}SERVER STACK${RESET}"
+    local server powered gen
+    server=$(echo  "$hdrs" | grep -i "^Server:"       | sed 's/[^:]*:[[:space:]]*//' | tr -d '\r')
+    powered=$(echo "$hdrs" | grep -i "^X-Powered-By:" | sed 's/[^:]*:[[:space:]]*//' | tr -d '\r')
+    gen=$(echo     "$hdrs" | grep -i "^X-Generator:"  | sed 's/[^:]*:[[:space:]]*//' | tr -d '\r')
+    [[ -n "$server"  ]] && { juicy "Server: $server";        results+="[TECH] Server: $server\n"; }
+    [[ -n "$powered" ]] && { juicy "X-Powered-By: $powered"; results+="[TECH] X-Powered-By: $powered\n"; }
+    [[ -n "$gen"     ]] && { juicy "X-Generator: $gen";      results+="[TECH] X-Generator: $gen\n"; }
+    [[ -z "${server}${powered}${gen}" ]] && info "No server header fingerprints."
+
+    echo -e "\n  ${BOLD}${W}CMS / FRAMEWORK${RESET}"
+    local detected=false
+    local body_hdrs="${page_content}${hdrs}"
+
+    echo "$page_content" | grep -qiE "wp-content|wp-includes|wp-json|wordpress"    && { juicy "WordPress detected";        results+="[TECH] WordPress\n";  detected=true; }
+    echo "$page_content" | grep -qiE "/components/com_|Joomla!|/media/jui/"        && { juicy "Joomla detected";           results+="[TECH] Joomla\n";     detected=true; }
+    echo "$page_content" | grep -qiE "Drupal\.settings|/sites/default/|drupal\.js" && { juicy "Drupal detected";           results+="[TECH] Drupal\n";     detected=true; }
+    echo "$body_hdrs"    | grep -qiE "__VIEWSTATE|__EVENTVALIDATION|X-AspNet"       && { juicy "ASP.NET detected";          results+="[TECH] ASP.NET\n";    detected=true; }
+    echo "$body_hdrs"    | grep -qiE "laravel_session|XSRF-TOKEN.*[Ll]aravel"       && { juicy "Laravel detected";          results+="[TECH] Laravel\n";    detected=true; }
+    echo "$page_content" | grep -qiE "csrfmiddlewaretoken|django"                   && { juicy "Django detected";           results+="[TECH] Django\n";     detected=true; }
+    echo "$body_hdrs"    | grep -qiE "authenticity_token|_rails_session"             && { juicy "Ruby on Rails detected";   results+="[TECH] Rails\n";      detected=true; }
+    echo "$hdrs"         | grep -qiE "X-Powered-By:.*[Ee]xpress|connect\.sid"       && { juicy "Express/Node.js detected"; results+="[TECH] Express\n";    detected=true; }
+    echo "$page_content" | grep -qiE "spring|thymeleaf"                             && { juicy "Spring (Java) detected";   results+="[TECH] Spring\n";     detected=true; }
+
+    $detected || info "No CMS/framework signatures detected."
+
+    echo -e "\n  ${BOLD}${W}FRONTEND LIBRARIES${RESET}"
+    local found_fe=false
+    if echo "$page_content" | grep -qiE "jquery"; then
+        local jq_ver; jq_ver=$(echo "$page_content" | grep -oP 'jquery[._\-]\K[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1)
+        info "jQuery${jq_ver:+ $jq_ver}"; found_fe=true
+    fi
+    if echo "$page_content" | grep -qiE "bootstrap"; then
+        local bs_ver; bs_ver=$(echo "$page_content" | grep -oP 'bootstrap[._\-]\K[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1)
+        info "Bootstrap${bs_ver:+ $bs_ver}"; found_fe=true
+    fi
+    echo "$page_content" | grep -qiE "react|ReactDOM"   && { info "React";   found_fe=true; }
+    echo "$page_content" | grep -qiE "angular|ng-app"   && { info "Angular"; found_fe=true; }
+    echo "$page_content" | grep -qiE "vue\.js|new Vue\(" && { info "Vue.js"; found_fe=true; }
+    $found_fe || info "No frontend library signatures detected."
+
+    divider
+    log "Tech fingerprint complete: $domain"
+}
+
+# ─────────────────────────────────────────────
+#  FUZZING — VIRTUAL HOST ENUMERATION
+# ─────────────────────────────────────────────
+run_vhost_enum() {
+    local vhost_wl
+    if [[ -n "${wordlist:-}" && -f "$wordlist" ]]; then
+        vhost_wl="$wordlist"
+        info "Using current wordlist: $(basename "$vhost_wl")"
+    else
+        wordlist_menu; vhost_wl="$wordlist"
+    fi
+    [[ ! -f "$vhost_wl" ]] && { error "Wordlist not found: $vhost_wl"; return 1; }
+
+    local hostname proto
+    hostname=$(echo "$domain" | sed 's|https\?://||' | cut -d'/' -f1 | cut -d':' -f1)
+    [[ "$domain" =~ ^https:// ]] && proto="https" || proto="http"
+
+    section "VIRTUAL HOST ENUMERATION  —  $hostname"
+    info "Wordlist: $(basename "$vhost_wl")"
+    info "Fuzzing Host: <word>.${hostname} against $domain  (baseline-filtered)"
+
+    local baseline
+    baseline=$(curl -s -o /dev/null -w "%{size_download}" --max-time 10 \
+                    -A "$user_agent" ${cookie:+-b "$cookie"} \
+                    ${proxy:+--proxy "$proxy"} "$domain" 2>/dev/null)
+    info "Baseline response size: ${baseline} bytes"
+    divider
+    echo -e "  ${DIM}${W}VHOST                                STATUS   SIZE${RESET}"
+    divider
+
+    local found=0
+    trap 'echo -e "\n${Y}[!]${RESET}  Scan interrupted."; trap - INT' INT
+    while IFS= read -r word; do
+        [[ -z "$word" || "$word" =~ ^# ]] && continue
+        local vhost="${word}.${hostname}"
+        local status size
+        read -r status size < <(curl -s -o /dev/null \
+                                     -w "%{http_code} %{size_download}" \
+                                     --max-time 8 -A "$user_agent" \
+                                     -H "Host: $vhost" \
+                                     ${cookie:+-b "$cookie"} ${proxy:+--proxy "$proxy"} \
+                                     "$domain" 2>/dev/null)
+        [[ "$status" == "000" ]] && continue
+        local diff=$(( size - baseline )); (( diff < 0 )) && diff=$(( -diff ))
+        if [[ "$status" =~ ^2 || "$status" =~ ^3 || $diff -gt 100 ]]; then
+            local cc; cc=$(colour_status "$status")
+            printf "  ${C}%-36s${RESET} [%s]  ${DIM}%s bytes${RESET}\n" "$vhost" "$cc" "$size"
+            results+="[VHOST] $vhost (HTTP $status, ${size}b)\n"
+            log "VHOST: $vhost ($status)"
+            (( found++ ))
+        fi
+    done < "$vhost_wl"
+    trap - INT
+
+    divider
+    (( found == 0 )) && info "No virtual hosts found." || success "$found vhost(s) found."
+    log "VHOST enumeration complete: $domain"
+}
+
+# ─────────────────────────────────────────────
+#  FUZZING — 403 / 401 BYPASS
+# ─────────────────────────────────────────────
+run_403_bypass() {
+    section "403 / 401 BYPASS ATTEMPTS"
+
+    local -a all_paths=()
+    while IFS= read -r dir; do [[ -n "$dir" ]] && all_paths+=("$dir"); done < "$ALL_DIRECTORIES_FILE"
+    [[ ${#all_paths[@]} -eq 0 ]] && { info "No paths found — run a directory scan first."; return; }
+
+    info "Probing ${#all_paths[@]} path(s) for blocked responses…"
+    local -a blocked=()
+    for path in "${all_paths[@]}"; do
+        local st
+        st=$(curl -s -o /dev/null -w "%{http_code}" --max-time 8 \
+                  -A "$user_agent" ${cookie:+-b "$cookie"} \
+                  ${proxy:+--proxy "$proxy"} "${domain}${path}" 2>/dev/null)
+        [[ "$st" == "401" || "$st" == "403" ]] && blocked+=("$path")
+    done
+
+    [[ ${#blocked[@]} -eq 0 ]] && { info "No 401/403 paths to test."; return; }
+    success "${#blocked[@]} blocked path(s) — running bypass techniques…"
+    divider
+
+    local bypassed=0
+    for path in "${blocked[@]}"; do
+        local base="${domain}${path}" p="${path#/}"
+        info "→ $path"
+
+        local -a try_labels=("double-slash" "dot-prefix" "trailing-dot-slash"
+                             "trailing-%20" "trailing-%09" "dot-semi")
+        local -a try_urls=("${domain}//${p}" "${domain}/.${path}" "${base}/."
+                           "${base}%20" "${base}%09" "${base}..;/")
+
+        local i
+        for (( i=0; i<${#try_urls[@]}; i++ )); do
+            local st
+            st=$(curl -s -o /dev/null -w "%{http_code}" --max-time 8 \
+                      -A "$user_agent" ${cookie:+-b "$cookie"} \
+                      ${proxy:+--proxy "$proxy"} "${try_urls[$i]}" 2>/dev/null)
+            if [[ "$st" == "200" || "$st" == "301" || "$st" == "302" ]]; then
+                alert "BYPASS [${try_labels[$i]}] → ${try_urls[$i]}  (HTTP $st)"
+                results+="[403BYPASS] ${try_labels[$i]}: ${try_urls[$i]} ($st)\n"
+                log "403 bypass [${try_labels[$i]}]: ${try_urls[$i]} ($st)"
+                (( bypassed++ ))
+            fi
+        done
+
+        local -a hdr_tests=(
+            "X-Original-URL: ${path}"
+            "X-Rewrite-URL: ${path}"
+            "X-Custom-IP-Authorization: 127.0.0.1"
+            "X-Forwarded-For: 127.0.0.1"
+            "X-Forwarded-Host: localhost"
+        )
+        for h in "${hdr_tests[@]}"; do
+            local st
+            st=$(curl -s -o /dev/null -w "%{http_code}" --max-time 8 \
+                      -A "$user_agent" ${cookie:+-b "$cookie"} \
+                      -H "$h" ${proxy:+--proxy "$proxy"} "$base" 2>/dev/null)
+            if [[ "$st" == "200" ]]; then
+                alert "BYPASS [header] '$h' → $base"
+                results+="[403BYPASS:HDR] $h → $base\n"
+                log "403 bypass header: $h → $base"
+                (( bypassed++ ))
+            fi
+        done
+    done
+
+    divider
+    (( bypassed == 0 )) && info "No bypasses found." || success "$bypassed bypass(es) found."
+    log "403 bypass complete"
+}
+
+# ─────────────────────────────────────────────
+#  FUZZING — EXTENSION BRUTE-FORCE
+# ─────────────────────────────────────────────
+run_ext_fuzz() {
+    section "EXTENSION BRUTE-FORCE"
+
+    local -a paths=()
+    while IFS= read -r dir; do [[ -n "$dir" ]] && paths+=("${dir%/}"); done < "$ALL_DIRECTORIES_FILE"
+    [[ ${#paths[@]} -eq 0 ]] && { info "No paths to fuzz — run a directory scan first."; return; }
+
+    local default_exts=".php .html .txt .bak .old .backup .asp .aspx .jsp .cfg .config .xml .json .log .sql"
+    info "Default extensions: $default_exts"
+    read -rp "  $(echo -e "${C}[?]${RESET}") Customise? [y/N]: " cust_ext
+    local exts_str="$default_exts"
+    [[ "$cust_ext" =~ ^[Yy]$ ]] && \
+        read -rp "  $(echo -e "${C}[?]${RESET}") Extensions (space-separated, include dot): " exts_str
+    read -ra exts <<< "$exts_str"
+
+    info "Testing ${#paths[@]} path(s) × ${#exts[@]} extension(s)…"
+    divider
+    echo -e "  ${DIM}${W}PATH+EXT                             STATUS   SIZE${RESET}"
+    divider
+
+    local found=0
+    trap 'echo -e "\n${Y}[!]${RESET}  Scan interrupted."; trap - INT' INT
+    for base_path in "${paths[@]}"; do
+        for ext in "${exts[@]}"; do
+            local test_url="${domain}${base_path}${ext}"
+            local status size
+            read -r status size < <(curl -s -o /dev/null \
+                                         -w "%{http_code} %{size_download}" \
+                                         --max-time 8 -A "$user_agent" \
+                                         ${cookie:+-b "$cookie"} \
+                                         ${proxy:+--proxy "$proxy"} \
+                                         "$test_url" 2>/dev/null)
+            if [[ "$status" != "404" && "$status" != "000" && "$status" != "400" ]]; then
+                local cc; cc=$(colour_status "$status")
+                local rel="${base_path}${ext}"
+                printf "  ${C}%-36s${RESET} [%s]  ${DIM}%s bytes${RESET}\n" "$rel" "$cc" "$size"
+                check_juicy "$rel" "$domain"
+                results+="[EXT] $test_url (HTTP $status)\n"
+                log "Ext fuzz: $test_url ($status)"
+                (( found++ ))
+            fi
+        done
+    done
+    trap - INT
+
+    divider
+    (( found == 0 )) && info "No interesting extension hits." || success "$found hit(s) found."
+    log "Extension fuzz complete"
+}
+
+# ─────────────────────────────────────────────
+#  FUZZING — HTTP METHOD FUZZING
+# ─────────────────────────────────────────────
+run_method_fuzz() {
+    section "HTTP METHOD FUZZING"
+
+    local -a urls=("$domain")
+    while IFS= read -r dir; do [[ -n "$dir" ]] && urls+=("$domain$dir"); done < "$ALL_DIRECTORIES_FILE"
+
+    local -a methods=("OPTIONS" "PUT" "DELETE" "PATCH" "TRACE" "CONNECT")
+    info "Testing ${#urls[@]} URL(s) × ${#methods[@]} method(s)…"
+    divider
+    echo -e "  ${DIM}${W}METHOD     PATH                         STATUS${RESET}"
+    divider
+
+    local found=0
+    for url in "${urls[@]}"; do
+        for method in "${methods[@]}"; do
+            local status
+            status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 8 \
+                          -X "$method" -A "$user_agent" \
+                          ${cookie:+-b "$cookie"} ${proxy:+--proxy "$proxy"} \
+                          "$url" 2>/dev/null)
+            if [[ "$status" != "404" && "$status" != "000" && \
+                  "$status" != "405" && "$status" != "501" && "$status" != "400" ]]; then
+                local cc; cc=$(colour_status "$status")
+                local rel="${url#$domain}"; [[ -z "$rel" ]] && rel="/"
+                printf "  ${C}%-10s${RESET} ${W}%-28s${RESET} [%s]\n" "$method" "$rel" "$cc"
+                results+="[METHOD] $method $url (HTTP $status)\n"
+                log "Method: $method $url ($status)"
+                (( found++ ))
+                if [[ "$method" == "OPTIONS" && "$status" == "200" ]]; then
+                    local allow
+                    allow=$(curl -s -I --max-time 8 -X OPTIONS -A "$user_agent" \
+                                ${cookie:+-b "$cookie"} "$url" 2>/dev/null | \
+                            grep -i "^Allow:" | tr -d '\r' | sed 's/[Aa]llow:[[:space:]]*//')
+                    [[ -n "$allow" ]] && info "  Allow: $allow"
+                fi
+            fi
+        done
+    done
+
+    divider
+    (( found == 0 )) && info "No interesting method responses." || \
+        success "$found interesting response(s)."
+    log "Method fuzz complete"
+}
+
+# ─────────────────────────────────────────────
+#  FUZZING — BACKUP FILE PROBE
+# ─────────────────────────────────────────────
+run_backup_probe() {
+    section "BACKUP FILE PROBE"
+
+    local -a paths=()
+    while IFS= read -r dir; do [[ -n "$dir" ]] && paths+=("$dir"); done < "$ALL_DIRECTORIES_FILE"
+    [[ ${#paths[@]} -eq 0 ]] && { info "No paths to probe — run a directory scan first."; return; }
+
+    local -a suffixes=(".bak" "~" ".old" ".orig" ".backup" ".copy" ".swp" ".1" ".save")
+    info "Probing ${#paths[@]} path(s)…"
+    divider
+    echo -e "  ${DIM}${W}PATH                                 STATUS   SIZE${RESET}"
+    divider
+
+    local found=0
+    trap 'echo -e "\n${Y}[!]${RESET}  Probe interrupted."; trap - INT' INT
+    for path in "${paths[@]}"; do
+        local -a all_sfx=("${suffixes[@]}")
+        [[ "$path" =~ \.php$ ]] && all_sfx+=(".php.bak" ".php~" ".php.old" ".php.swp")
+        for sfx in "${all_sfx[@]}"; do
+            local test_url="${domain}${path}${sfx}"
+            local status size
+            read -r status size < <(curl -s -o /dev/null \
+                                         -w "%{http_code} %{size_download}" \
+                                         --max-time 8 -A "$user_agent" \
+                                         ${cookie:+-b "$cookie"} \
+                                         ${proxy:+--proxy "$proxy"} \
+                                         "$test_url" 2>/dev/null)
+            if [[ "$status" != "404" && "$status" != "000" && "$status" != "400" ]]; then
+                local cc; cc=$(colour_status "$status")
+                local rel="${path}${sfx}"
+                printf "  ${C}%-36s${RESET} [%s]  ${DIM}%s bytes${RESET}\n" "$rel" "$cc" "$size"
+                juicy "Backup file → ${domain}${rel}"
+                results+="[BACKUP] ${domain}${rel} (HTTP $status)\n"
+                log "Backup: ${domain}${rel} ($status)"
+                (( found++ ))
+            fi
+        done
+    done
+    trap - INT
+
+    divider
+    (( found == 0 )) && info "No backup files found." || success "$found backup file(s) found."
+    log "Backup probe complete"
+}
+
+# ─────────────────────────────────────────────
 #  ARGUMENT PARSING
 # ─────────────────────────────────────────────
 domain=""; user_agent="$USER_AGENT"; cookie=""; proxy=""; extra_headers=""; rate_limit=""
@@ -936,8 +1564,9 @@ echo -e "  ${BOLD}${W}SELECT MODE${RESET}"
 divider
 echo -e "    ${C}[1]${RESET}  Directory scanning     ${DIM}— fuzz paths on a web target${RESET}"
 echo -e "    ${C}[2]${RESET}  Subdomain enumeration  ${DIM}— brute-force subdomains of a domain${RESET}"
+echo -e "    ${C}[3]${RESET}  Passive recon          ${DIM}— SSL, JS endpoints, CORS, cookies, tech fingerprint${RESET}"
 divider
-read -rp "  $(echo -e "${C}[?]${RESET}") Mode [1/2, default 1]: " mode_choice
+read -rp "  $(echo -e "${C}[?]${RESET}") Mode [1/2/3, default 1]: " mode_choice
 mode_choice="${mode_choice:-1}"
 
 results=""
@@ -976,8 +1605,52 @@ if [[ "$mode_choice" == "2" ]]; then
                      run_subdomain_enum "$dns_wordlist" ;;
             HEADERS) inspect_headers ;;
             NIKTO)   run_nikto ;;
-            "")      warn "Available: RESCAN  HEADERS  NIKTO  EXIT" ;;
-            *)       warn "Unknown command. Available: RESCAN  HEADERS  NIKTO  EXIT" ;;
+            VHOST)   run_vhost_enum ;;
+            "")      warn "Available: RESCAN  VHOST  HEADERS  NIKTO  EXIT" ;;
+            *)       warn "Unknown command. Available: RESCAN  VHOST  HEADERS  NIKTO  EXIT" ;;
+        esac
+    done
+
+    save_results
+    echo ""
+    info "Log written to ${BOLD}$LOG_FILE${RESET}"
+    log "Exiting"
+    exit 0
+fi
+
+# ════════════════════════════════════════════
+#  MODE 3 — PASSIVE RECON
+# ════════════════════════════════════════════
+if [[ "$mode_choice" == "3" ]]; then
+    if [[ -z "$proxy" ]]; then
+        read -rp "  $(echo -e "${C}[?]${RESET}") Proxy URL (blank to skip): " proxy
+    fi
+
+    echo ""
+    log "Passive recon mode — domain: $domain"
+
+    fingerprint_tech
+    inspect_ssl
+    analyze_cookies
+    fetch_robots_sitemap
+    inspect_headers
+
+    while true; do
+        echo ""
+        read -rp "  $(echo -e "${C}[?]${RESET}") Command: " input
+        echo ""
+        case "${input^^}" in
+            EXIT)    log "Session ended by user"; break ;;
+            SSL)     inspect_ssl ;;
+            JS)      run_js_recon ;;
+            CORS)    check_cors ;;
+            COOKIES) analyze_cookies ;;
+            TECH)    fingerprint_tech ;;
+            HEADERS) inspect_headers ;;
+            ROBOTS)  fetch_robots_sitemap ;;
+            NIKTO)   run_nikto ;;
+            "")      warn "Commands: SSL  JS  CORS  COOKIES  TECH  HEADERS  ROBOTS  NIKTO  EXIT" ;;
+            *)       warn "Unknown. Try: SSL  JS  CORS  COOKIES  TECH  HEADERS  ROBOTS  NIKTO  EXIT" ;;
         esac
     done
 
@@ -1043,6 +1716,14 @@ while true; do
             fetch_robots_sitemap ;;
         PARAMS)
             run_param_fuzz ;;
+        BYPASS)
+            run_403_bypass ;;
+        EXT)
+            run_ext_fuzz ;;
+        METHODS)
+            run_method_fuzz ;;
+        BACKUP)
+            run_backup_probe ;;
         "")
             warn "No input — enter a command or comma-separated search terms." ;;
         *)
