@@ -319,6 +319,7 @@ run_enum() {
     [[ -n "$IGNORE_CODES" ]] && scan_flags+=("-b" "$IGNORE_CODES")
     [[ -n "$rate_limit"   ]] && scan_flags+=("--delay" "${rate_limit}ms")
     [[ -n "$proxy"        ]] && scan_flags+=("--proxy" "$proxy")
+    [[ "$target" =~ ^https:// ]] && scan_flags+=("--no-tls-validation")
 
     trap 'echo -e "\n${Y}[!]${RESET}  Scan interrupted — using paths found so far."; trap - INT' INT
 
@@ -633,6 +634,9 @@ run_subdomain_enum() {
     section "SUBDOMAIN ENUMERATION  —  $hostname"
     info "Wordlist: $(basename "$sub_wordlist")"
     info "This may take a while depending on wordlist size…"
+    local proto="http"
+    [[ "$domain" =~ ^https:// ]] && proto="https"
+
     divider
     echo -e "  ${DIM}${W}SUBDOMAIN                            STATUS${RESET}"
     divider
@@ -643,14 +647,14 @@ run_subdomain_enum() {
         local sub="${word}.${hostname}"
         local status
         status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 \
-                      -A "$user_agent" ${proxy:+--proxy "$proxy"} \
-                      "http://$sub" 2>/dev/null)
+                      -k -A "$user_agent" ${proxy:+--proxy "$proxy"} \
+                      "${proto}://$sub" 2>/dev/null)
         if [[ "$status" != "000" && "$status" != "400" ]]; then
             local coloured_code
             coloured_code=$(colour_status "$status")
             printf "  ${C}%-36s${RESET} [%s]\n" "$sub" "$coloured_code"
-            results+="[SUBDOMAIN] $sub (HTTP $status)\n"
-            log "Subdomain: $sub ($status)"
+            results+="[SUBDOMAIN] $sub ($proto:$status)\n"
+            log "Subdomain: $sub ($proto:$status)"
             (( found_subs++ ))
         fi
     done < "$sub_wordlist"
